@@ -1,0 +1,21 @@
+# Build artifacts
+/target
+**/target/
+
+# Rust toolchain state
+.cargo/
+.rustup/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Environment files
+.env
+
+# Misc
+**/*.rs.bk
+.DS_Store

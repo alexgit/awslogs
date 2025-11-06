@@ -1,0 +1,35 @@
+# Key bindings
+
+## Running queries
+Ctrl+Enter / Ctrl+R / F5     Run the current query
+Enter (From/To/Log group)    Run the query from focused single-line input
+Ctrl+C                       Exit the application
+
+## Navigation
+Tab / Shift+Tab              Move focus between inputs and results
+Ctrl+Up / Ctrl+Down          Hide or restore the input panes
+Ctrl+H                       Toggle this help screen
+
+## Query files
+Ctrl+S                       Save the current query under ./queries
+Ctrl+O                       Load a query file into the editor
+
+## Time range
+Space / Enter (Time mode)    Switch between relative and absolute range
+Up / Down (Relative range)   Cycle available relative windows
+Relative mode queries now minus the selection; absolute mode uses From/To fields.
+
+## Results list
+Enter                        Toggle row selection / open detail modal
+Up / Down                    Move the highlighted row
+x                            Exit row selection / close detail modal
+Esc                          Close detail modal or return focus
+
+## Filtering
+/ (in results)               Show the filter box
+Enter (in filter)            Apply filter and return to results
+Filter tokens accept case-insensitive +include and -exclude terms.
+Example: +error +timeout -debug
+
+## Query editor
+Regular text editing; Ctrl+Enter executes without leaving the editor.
