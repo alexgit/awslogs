@@ -1,4 +1,4 @@
-# Vibe-coded AWS CloudWatch Logs viewer TUI
+# Vibe-coded AWS Logs Insights TUI
 
 ## Execute Logs Insights queries and scroll through results
 ![Main TUI view](screenshots/01.png)
