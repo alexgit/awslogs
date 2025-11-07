@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Write;
 use std::time::{Duration, Instant};
@@ -170,6 +171,7 @@ pub struct App {
     pub query_scroll_col: u16,
     pub results: QueryResults,
     pub column_visibility: Vec<bool>,
+    pub column_visibility_overrides: HashMap<String, bool>,
     pub results_initialized: bool,
     pub status_kind: StatusKind,
     pub filtered_indices: Vec<usize>,
@@ -348,7 +350,7 @@ impl App {
         self.column_modal = None;
         self.results.headers = data.headers;
         self.results.rows = data.rows.into_iter().map(ResultRow::new).collect();
-        self.column_visibility = vec![true; self.results.headers.len()];
+        self.sync_column_visibility();
         self.results_initialized = true;
         self.apply_filter_now();
         if !self.results.rows.is_empty() {
@@ -799,6 +801,7 @@ impl Default for App {
             query_scroll_col: 0,
             results: QueryResults::default(),
             column_visibility: Vec::new(),
+            column_visibility_overrides: HashMap::new(),
             results_initialized: false,
             status_kind: StatusKind::Info,
             filtered_indices: Vec::new(),
@@ -821,10 +824,7 @@ impl Default for App {
 
 impl App {
     pub fn ensure_column_visibility_len(&mut self) {
-        let expected = self.results.headers.len();
-        if self.column_visibility.len() != expected {
-            self.column_visibility = vec![true; expected];
-        }
+        self.sync_column_visibility();
     }
 
     pub fn visible_column_indices(&self) -> Vec<usize> {
@@ -841,6 +841,46 @@ impl App {
             indices.push(0);
         }
         indices
+    }
+
+    fn apply_column_visibility_overrides(&mut self, selections: Vec<bool>) {
+        for (header, visible) in self
+            .results
+            .headers
+            .iter()
+            .cloned()
+            .zip(selections.iter().copied())
+        {
+            if visible {
+                self.column_visibility_overrides.remove(&header);
+            } else {
+                self.column_visibility_overrides.insert(header, false);
+            }
+        }
+        self.sync_column_visibility();
+    }
+
+    fn sync_column_visibility(&mut self) {
+        if self.results.headers.is_empty() {
+            self.column_visibility.clear();
+            return;
+        }
+        let mut new_visibility = Vec::with_capacity(self.results.headers.len());
+        for header in &self.results.headers {
+            let visible = self
+                .column_visibility_overrides
+                .get(header)
+                .copied()
+                .unwrap_or(true);
+            new_visibility.push(visible);
+        }
+        if !new_visibility.iter().any(|visible| *visible) && !new_visibility.is_empty() {
+            new_visibility[0] = true;
+            if let Some(first) = self.results.headers.get(0) {
+                self.column_visibility_overrides.remove(first);
+            }
+        }
+        self.column_visibility = new_visibility;
     }
 
     pub fn open_column_modal(&mut self) {
@@ -863,7 +903,8 @@ impl App {
 
     pub fn apply_column_modal(&mut self) {
         if let Some(state) = self.column_modal.take() {
-            self.column_visibility = state.into_selections();
+            let selections = state.into_selections();
+            self.apply_column_visibility_overrides(selections);
         }
     }
 
