@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fmt::Write;
 use std::time::{Duration, Instant};
@@ -172,6 +172,7 @@ pub struct App {
     pub results: QueryResults,
     pub column_visibility: Vec<bool>,
     pub column_visibility_overrides: HashMap<String, bool>,
+    pub column_filter_headers: Vec<String>,
     pub results_initialized: bool,
     pub status_kind: StatusKind,
     pub filtered_indices: Vec<usize>,
@@ -357,6 +358,29 @@ impl App {
             self.focus = FocusField::Results;
             self.enter_results_navigation();
         }
+        self.prompt_for_column_filter_if_needed();
+    }
+
+    fn prompt_for_column_filter_if_needed(&mut self) {
+        if self.should_prompt_for_column_filter() {
+            self.open_column_modal();
+        }
+    }
+
+    fn should_prompt_for_column_filter(&self) -> bool {
+        if self.results.headers.is_empty() {
+            return false;
+        }
+        if self.column_filter_headers.is_empty() {
+            return true;
+        }
+        let current: HashSet<&str> = self.results.headers.iter().map(|s| s.as_str()).collect();
+        let filter: HashSet<&str> = self
+            .column_filter_headers
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        current != filter
     }
 
     pub fn clear_results(&mut self) {
@@ -802,6 +826,7 @@ impl Default for App {
             results: QueryResults::default(),
             column_visibility: Vec::new(),
             column_visibility_overrides: HashMap::new(),
+            column_filter_headers: Vec::new(),
             results_initialized: false,
             status_kind: StatusKind::Info,
             filtered_indices: Vec::new(),
@@ -905,6 +930,7 @@ impl App {
         if let Some(state) = self.column_modal.take() {
             let selections = state.into_selections();
             self.apply_column_visibility_overrides(selections);
+            self.column_filter_headers = self.results.headers.clone();
         }
     }
 
