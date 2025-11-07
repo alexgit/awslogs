@@ -16,6 +16,10 @@
 # Environment files
 .env
 
+# Saved queries
+/queries
+**/queries
+
 # Misc
 **/*.rs.bk
 .DS_Store

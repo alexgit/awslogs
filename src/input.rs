@@ -1,18 +1,17 @@
 use std::env;
 use std::error::Error;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arboard::Clipboard;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use rfd::FileDialog;
 use tokio::sync::mpsc;
 use tokio::task;
 use tui_input::backend::crossterm::EventHandler;
 use tui_textarea::Input as TextAreaInput;
 
-use crate::app::{App, FocusField};
+use crate::app::{App, FocusField, QueryFileEntry, SaveDialogMode};
 use crate::log_fetcher::{LogFetcher, QueryOutcome};
 
 const QUERIES_DIR: &str = "queries";
@@ -70,6 +69,72 @@ pub async fn handle_key_event(
         return Ok(false);
     }
 
+    if app.save_dialog_active() {
+        match code {
+            KeyCode::Esc => {
+                app.close_save_dialog();
+                app.set_status("Save canceled");
+            }
+            KeyCode::Up => {
+                if let Some(state) = app.save_dialog_state_mut() {
+                    state.move_selection(-1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(state) = app.save_dialog_state_mut() {
+                    state.move_selection(1);
+                }
+            }
+            KeyCode::Enter => {
+                if let Err(err) = confirm_save_dialog(app).await {
+                    app.set_error(err);
+                }
+            }
+            _ => {
+                if let Some(state) = app.save_dialog_state_mut() {
+                    let event = Event::Key(key);
+                    let _ = state.input.handle_event(&event);
+                }
+            }
+        }
+        return Ok(false);
+    }
+
+    if app.open_dialog_active() {
+        match code {
+            KeyCode::Esc => {
+                app.close_open_dialog();
+                app.set_status("Open canceled");
+            }
+            KeyCode::Enter => {
+                if let Err(err) = confirm_open_dialog(app).await {
+                    app.set_error(err);
+                }
+            }
+            KeyCode::Up => {
+                if let Some(state) = app.open_dialog_state_mut() {
+                    state.move_selection(-1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(state) = app.open_dialog_state_mut() {
+                    state.move_selection(1);
+                }
+            }
+            _ => {
+                if let Some(state) = app.open_dialog_state_mut() {
+                    let event = Event::Key(key);
+                    let previous = state.filter_input.value().to_string();
+                    let _ = state.filter_input.handle_event(&event);
+                    if state.filter_input.value() != previous {
+                        state.apply_filter();
+                    }
+                }
+            }
+        }
+        return Ok(false);
+    }
+
     if app.column_modal_active() {
         match code {
             KeyCode::Esc => {
@@ -122,15 +187,26 @@ pub async fn handle_key_event(
     }
 
     if (ctrl || super_mod) && matches!(code, KeyCode::Char('s') | KeyCode::Char('S')) {
-        if let Err(err) = save_query_via_dialog(app).await {
-            app.set_error(err);
+        match gather_query_file_entries().await {
+            Ok(entries) => {
+                let prefill = app.saved_query_file_name();
+                app.open_save_dialog_with_entries(SaveDialogMode::Save, prefill, entries);
+            }
+            Err(err) => app.set_error(err),
         }
         return Ok(false);
     }
 
     if (ctrl || super_mod) && matches!(code, KeyCode::Char('o') | KeyCode::Char('O')) {
-        if let Err(err) = load_query_via_dialog(app).await {
-            app.set_error(err);
+        match gather_query_file_entries().await {
+            Ok(entries) => {
+                if entries.is_empty() {
+                    app.set_status("No saved queries available");
+                } else {
+                    app.open_open_dialog(entries);
+                }
+            }
+            Err(err) => app.set_error(err),
         }
         return Ok(false);
     }
@@ -384,103 +460,118 @@ fn focus_accepts_text_input(focus: FocusField) -> bool {
     )
 }
 
-async fn save_query_via_dialog(app: &mut App) -> Result<(), String> {
-    let query_to_save = app.query_text();
-    if query_to_save.trim().is_empty() {
-        app.set_status("Current query is empty; nothing to save");
+async fn confirm_save_dialog(app: &mut App) -> Result<(), String> {
+    let filename = if let Some(state) = app.save_dialog_state_mut() {
+        state.input.value().to_string()
+    } else {
+        return Ok(());
+    };
+    if filename.is_empty() {
+        app.set_status("Please enter a file name");
         return Ok(());
     }
-
-    let queries_dir = queries_directory()?;
-    let queries_dir_for_display = queries_dir.clone();
-    let save_result = {
-        let queries_dir = queries_dir.clone();
-        let payload = query_to_save;
-        task::spawn_blocking(move || -> Result<Option<PathBuf>, String> {
-            fs::create_dir_all(&queries_dir)
-                .map_err(|err| format!("Unable to prepare {QUERIES_DIR} directory: {err}"))?;
-            let selection = FileDialog::new()
-                .set_directory(&queries_dir)
-                .set_title("Save Logs Insights query")
-                .save_file();
-            match selection {
-                Some(path) => {
-                    let filename = path
-                        .file_name()
-                        .ok_or_else(|| "Please choose a file name".to_string())?
-                        .to_owned();
-                    let destination = queries_dir.join(filename);
-                    fs::write(&destination, payload)
-                        .map_err(|err| format!("Failed to write file: {err}"))?;
-                    Ok(Some(destination))
-                }
-                None => Ok(None),
-            }
-        })
-    }
-    .await
-    .map_err(|err| format!("Save operation interrupted: {err}"))??;
-
-    match save_result {
-        Some(saved_path) => {
-            let display = saved_path
-                .strip_prefix(&queries_dir_for_display)
-                .ok()
-                .map(|relative| format!("{QUERIES_DIR}/{}", relative.display()))
-                .unwrap_or_else(|| saved_path.display().to_string());
-            app.set_status(format!("Saved query to {display}"));
-        }
-        None => app.set_status("Save canceled"),
-    }
+    let destination = queries_directory()?.join(filename);
+    save_query_to_path(app, destination).await?;
+    app.close_save_dialog();
     Ok(())
 }
 
-async fn load_query_via_dialog(app: &mut App) -> Result<(), String> {
+async fn confirm_open_dialog(app: &mut App) -> Result<(), String> {
+    let Some(path) = app.open_dialog_selected_path() else {
+        app.set_status("No matching queries to open");
+        return Ok(());
+    };
+    load_query_from_path(app, path).await?;
+    app.close_open_dialog();
+    Ok(())
+}
+
+async fn save_query_to_path(app: &mut App, destination: PathBuf) -> Result<(), String> {
+    let contents = app.query_text();
+    if contents.trim().is_empty() {
+        app.set_status("Current query is empty; nothing to save");
+        return Ok(());
+    }
     let queries_dir = queries_directory()?;
-    let queries_dir_for_display = queries_dir.clone();
-    let load_result = {
+    let path = destination.clone();
+    let payload = contents;
+    task::spawn_blocking(move || -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("Unable to prepare save directory: {err}"))?;
+        }
+        fs::write(&path, payload).map_err(|err| format!("Failed to write file: {err}"))
+    })
+    .await
+    .map_err(|err| format!("Save operation interrupted: {err}"))??;
+    let display = format_query_display(&destination, &queries_dir);
+    app.set_saved_query_path(destination);
+    app.set_status(format!("Saved query to {display}"));
+    Ok(())
+}
+
+async fn load_query_from_path(app: &mut App, path: PathBuf) -> Result<(), String> {
+    let queries_dir = queries_directory()?;
+    let target = path.clone();
+    let contents = task::spawn_blocking(move || -> Result<String, String> {
+        fs::read_to_string(&target).map_err(|err| format!("Failed to read file: {err}"))
+    })
+    .await
+    .map_err(|err| format!("Load operation interrupted: {err}"))??;
+    app.replace_query_text(contents);
+    if app.inputs_collapsed {
+        app.expand_inputs();
+    }
+    app.focus = FocusField::Query;
+    app.set_saved_query_path(path.clone());
+    let display = format_query_display(&path, &queries_dir);
+    app.set_status(format!("Loaded query from {display}"));
+    Ok(())
+}
+
+async fn gather_query_file_entries() -> Result<Vec<QueryFileEntry>, String> {
+    let queries_dir = queries_directory()?;
+    let entries = {
         let queries_dir = queries_dir.clone();
-        task::spawn_blocking(move || -> Result<Option<(PathBuf, String)>, String> {
+        task::spawn_blocking(move || -> Result<Vec<QueryFileEntry>, String> {
             fs::create_dir_all(&queries_dir)
                 .map_err(|err| format!("Unable to prepare {QUERIES_DIR} directory: {err}"))?;
-            let selection = FileDialog::new()
-                .set_directory(&queries_dir)
-                .set_title("Open Logs Insights query")
-                .pick_file();
-            match selection {
-                Some(path) => {
-                    let contents = fs::read_to_string(&path)
-                        .map_err(|err| format!("Failed to read file: {err}"))?;
-                    Ok(Some((path, contents)))
+            let mut list = Vec::new();
+            for entry in fs::read_dir(&queries_dir)
+                .map_err(|err| format!("Unable to read {QUERIES_DIR}: {err}"))?
+            {
+                let entry = entry.map_err(|err| format!("Failed to read entry: {err}"))?;
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
                 }
-                None => Ok(None),
+                let display = entry
+                    .file_name()
+                    .to_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                let searchable = display.to_ascii_lowercase();
+                list.push(QueryFileEntry {
+                    display,
+                    path,
+                    searchable,
+                });
             }
+            list.sort_by(|a, b| a.searchable.cmp(&b.searchable));
+            Ok(list)
         })
     }
     .await
-    .map_err(|err| format!("Load operation interrupted: {err}"))??;
+    .map_err(|err| format!("Listing queries interrupted: {err}"))??;
+    Ok(entries)
+}
 
-    match load_result {
-        Some((path, contents)) => {
-            app.replace_query_text(contents);
-            if app.inputs_collapsed {
-                app.expand_inputs();
-            }
-            app.focus = FocusField::Query;
-            let display = if path.starts_with(&queries_dir_for_display) {
-                path.strip_prefix(&queries_dir_for_display)
-                    .ok()
-                    .map(|relative| format!("{QUERIES_DIR}/{}", relative.display()))
-                    .unwrap_or_else(|| path.display().to_string())
-            } else {
-                path.display().to_string()
-            };
-            app.set_status(format!("Loaded query from {display}"));
-        }
-        None => app.set_status("Load canceled"),
+fn format_query_display(path: &Path, base: &Path) -> String {
+    if let Ok(relative) = path.strip_prefix(base) {
+        format!("{QUERIES_DIR}/{}", relative.display())
+    } else {
+        path.display().to_string()
     }
-
-    Ok(())
 }
 
 pub(crate) fn start_query_submission(

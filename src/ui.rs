@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -5,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap}
 use ratatui::Frame;
 use tui_input::Input as SingleLineInput;
 
-use crate::app::{App, FocusField, StatusKind};
+use crate::app::{App, FocusField, OpenDialogState, SaveDialogMode, SaveDialogState, StatusKind};
 use crate::help;
 use crate::presentation::{format_modal_message, format_modal_value};
 use crate::widgets::column_picker::ColumnVisibilityModal;
@@ -229,9 +231,18 @@ pub fn draw_ui(frame: &mut Frame, app: &mut App) {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(query_chunk);
 
-        let query_block = input_block("Logs Insights query", app.focus == FocusField::Query);
-        app.query_area.set_block(query_block.clone());
+        let query_title = app.query_block_title();
+        let query_block = input_block(Cow::Owned(query_title), app.focus == FocusField::Query);
+        if app.focus == FocusField::Query {
+            app.query_area
+                .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+        } else {
+            let hidden_style = app.query_area.cursor_line_style();
+            app.query_area.set_cursor_style(hidden_style);
+        }
+        app.query_area.set_block(Block::default());
         frame.render_widget(app.query_area.widget(), row[0]);
+        frame.render_widget(query_block.clone(), row[0]);
         let inner = query_block.inner(row[0]);
         if inner.width > 0 && inner.height > 0 {
             let (cursor_row, cursor_col) = app.query_area.cursor();
@@ -239,16 +250,6 @@ pub fn draw_ui(frame: &mut Frame, app: &mut App) {
                 next_scroll_position(app.query_scroll_row, cursor_row, inner.height);
             app.query_scroll_col =
                 next_scroll_position(app.query_scroll_col, cursor_col, inner.width);
-
-            if app.focus == FocusField::Query {
-                let visible_col = cursor_col.saturating_sub(app.query_scroll_col as usize);
-                let visible_row = cursor_row.saturating_sub(app.query_scroll_row as usize);
-                let max_col = inner.width.saturating_sub(1) as usize;
-                let max_row = inner.height.saturating_sub(1) as usize;
-                let x = inner.x + visible_col.min(max_col) as u16;
-                let y = inner.y + visible_row.min(max_row) as u16;
-                frame.set_cursor(x, y);
-            }
         }
         Some(row)
     } else {
@@ -405,6 +406,10 @@ pub fn draw_ui(frame: &mut Frame, app: &mut App) {
             let widget = ColumnVisibilityModal::new(headers.as_slice());
             frame.render_stateful_widget(widget, overlay, state);
         }
+    } else if app.open_dialog_active() {
+        render_open_dialog(frame, app);
+    } else if app.save_dialog_active() {
+        render_save_dialog(frame, app);
     } else if app.modal_open {
         if let Some(details) = app.selected_row_data() {
             let overlay = centered_rect(80, 70, frame.size());
@@ -462,8 +467,11 @@ pub fn draw_ui(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn input_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
-    let base = Block::default().title(title).borders(Borders::ALL);
+fn input_block<'a>(title: impl Into<Cow<'a, str>>, focused: bool) -> Block<'a> {
+    let title_cow: Cow<'a, str> = title.into();
+    let base = Block::default()
+        .title(Line::from(title_cow.into_owned()))
+        .borders(Borders::ALL);
     if focused {
         base.border_style(
             Style::default()
@@ -525,4 +533,175 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage(bottom_margin),
         ])
         .split(horizontal[1])[1]
+}
+
+fn render_save_dialog(frame: &mut Frame, app: &mut App) {
+    let overlay = centered_rect(60, 60, frame.size());
+    frame.render_widget(Clear, overlay);
+    let Some(state) = app.save_dialog_state_mut() else {
+        return;
+    };
+    let title = match state.mode {
+        SaveDialogMode::Save => "Save query",
+    };
+    let block = Block::default().title(title).borders(Borders::ALL);
+    let inner = block.inner(overlay);
+    frame.render_widget(block, overlay);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    render_dialog_input(frame, chunks[0], "File name", &state.input);
+    render_save_dialog_list(frame, chunks[1], state);
+    let hint = Paragraph::new("↑/↓ select existing • Enter: Save • Esc: Cancel")
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hint, chunks[2]);
+}
+
+fn render_save_dialog_list(frame: &mut Frame, area: Rect, state: &mut SaveDialogState) {
+    let list_block = Block::default()
+        .title("Existing files")
+        .borders(Borders::ALL);
+    let inner = list_block.inner(area);
+    frame.render_widget(list_block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let mut lines: Vec<Line> = Vec::new();
+    if state.entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No saved queries found",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        let view_height = inner.height.max(1) as usize;
+        let (start, end) = state.visible_bounds(view_height);
+        for idx in start..end {
+            if let Some(entry) = state.entries.get(idx) {
+                let selected = state.selected_index == Some(idx);
+                let prefix = if selected { ">" } else { " " };
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Rgb(255, 246, 199))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("{prefix} {}", entry.display),
+                    style,
+                )));
+            }
+        }
+    }
+    let list = Paragraph::new(lines);
+    frame.render_widget(list, inner);
+}
+
+fn render_open_dialog(frame: &mut Frame, app: &mut App) {
+    let overlay = centered_rect(60, 70, frame.size());
+    frame.render_widget(Clear, overlay);
+    let Some(state) = app.open_dialog_state_mut() else {
+        return;
+    };
+    let block = Block::default()
+        .title("Open query")
+        .borders(Borders::ALL)
+        .padding(ratatui::widgets::Padding::new(1, 1, 1, 1));
+    let inner = block.inner(overlay);
+    frame.render_widget(block, overlay);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    render_dialog_input(frame, chunks[0], "Filter", &state.filter_input);
+    let list_area = chunks[1];
+    render_open_dialog_list(frame, list_area, state);
+    let hint = Paragraph::new("↑/↓ select • Type to filter • Enter: Open • Esc: Cancel")
+        .style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(hint, chunks[2]);
+}
+
+fn render_open_dialog_list(frame: &mut Frame, area: Rect, state: &mut OpenDialogState) {
+    let list_block = Block::default()
+        .title("Saved queries")
+        .borders(Borders::ALL);
+    let inner = list_block.inner(area);
+    frame.render_widget(list_block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let mut lines: Vec<Line> = Vec::new();
+    if state.filtered_indices.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No saved queries match the filter",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        let view_height = inner.height.max(1) as usize;
+        let (start, end) = state.visible_bounds(view_height);
+        let selected = state.selected_filtered_index;
+        for filtered_idx in start..end {
+            let entry_idx = state
+                .filtered_indices
+                .get(filtered_idx)
+                .copied()
+                .unwrap_or(0);
+            if let Some(entry) = state.entries.get(entry_idx) {
+                let prefix = if Some(filtered_idx) == selected {
+                    ">"
+                } else {
+                    " "
+                };
+                let style = if Some(filtered_idx) == selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Rgb(255, 246, 199))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("{prefix} {}", entry.display),
+                    style,
+                )));
+            }
+        }
+    }
+    let list = Paragraph::new(lines);
+    frame.render_widget(list, inner);
+}
+
+fn render_dialog_input(frame: &mut Frame, area: Rect, title: &str, input: &SingleLineInput) {
+    let block = Block::default().title(title).borders(Borders::ALL);
+    let inner = block.inner(area);
+    let widget = Paragraph::new(input.value()).block(block.clone());
+    frame.render_widget(widget, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let width = inner.width as usize;
+    let scroll = input.visual_scroll(width);
+    let cursor = input.visual_cursor();
+    let visible_col = cursor.saturating_sub(scroll);
+    let max_col = width.saturating_sub(1);
+    let cursor_col = visible_col.min(max_col);
+    let x = inner.x + cursor_col as u16;
+    let y = inner.y;
+    frame.set_cursor(x, y);
 }

@@ -18,7 +18,7 @@ Enter (From/To/Log group)      Run using the value in the focused single-line in
 Enter (Relative range)         Run using the highlighted relative window
 
 ## Query files
-Ctrl+S                         Save the current query under ./queries
+Ctrl+S                         Save (always prompts for a file name under ./queries)
 Ctrl+O                         Load a query file into the editor
 
 ## Time range

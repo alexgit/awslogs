@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fmt::Write;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use chrono::Duration as ChronoDuration;
@@ -52,6 +53,201 @@ pub enum StatusKind {
 pub struct QueryResults {
     pub headers: Vec<String>,
     pub rows: Vec<ResultRow>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SaveDialogMode {
+    Save,
+}
+
+pub struct SaveDialogState {
+    pub input: SingleLineInput,
+    pub mode: SaveDialogMode,
+    pub entries: Vec<QueryFileEntry>,
+    pub selected_index: Option<usize>,
+    pub scroll: usize,
+}
+
+impl SaveDialogState {
+    pub fn new(
+        mode: SaveDialogMode,
+        input: SingleLineInput,
+        mut entries: Vec<QueryFileEntry>,
+    ) -> Self {
+        entries.sort_by(|a, b| a.searchable.cmp(&b.searchable));
+        let prefill_value = input.value().to_string();
+        let selected_index = if entries.is_empty() {
+            None
+        } else if prefill_value.is_empty() {
+            Some(0)
+        } else {
+            entries
+                .iter()
+                .position(|entry| entry.display == prefill_value)
+                .or(Some(0))
+        };
+        Self {
+            input,
+            mode,
+            entries,
+            selected_index,
+            scroll: 0,
+        }
+    }
+
+    pub fn move_selection(&mut self, delta: i32) {
+        if self.entries.is_empty() {
+            self.selected_index = None;
+            return;
+        }
+        let current = self.selected_index.unwrap_or(0) as i32;
+        let len = self.entries.len() as i32;
+        let mut next = current + delta;
+        if next < 0 {
+            next = 0;
+        } else if next >= len {
+            next = len - 1;
+        }
+        let next = next as usize;
+        if Some(next) != self.selected_index {
+            self.selected_index = Some(next);
+            if let Some(entry) = self.entries.get(next) {
+                self.input = SingleLineInput::new(entry.display.clone());
+            }
+        }
+    }
+
+    pub fn visible_bounds(&mut self, view_height: usize) -> (usize, usize) {
+        self.ensure_visible(view_height);
+        let end = (self.scroll + view_height).min(self.entries.len());
+        (self.scroll, end)
+    }
+
+    fn ensure_visible(&mut self, view_height: usize) {
+        if view_height == 0 || self.entries.is_empty() {
+            self.scroll = 0;
+            return;
+        }
+        let selected = self.selected_index.unwrap_or(0);
+        if selected < self.scroll {
+            self.scroll = selected;
+            return;
+        }
+        let view_height = view_height.min(self.entries.len());
+        let bottom = self.scroll.saturating_add(view_height.saturating_sub(1));
+        if selected > bottom {
+            let needed = selected + 1;
+            self.scroll = needed.saturating_sub(view_height);
+        }
+        let max_scroll = self.entries.len().saturating_sub(view_height);
+        if self.scroll > max_scroll {
+            self.scroll = max_scroll;
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct QueryFileEntry {
+    pub display: String,
+    pub path: PathBuf,
+    pub searchable: String,
+}
+
+pub struct OpenDialogState {
+    pub entries: Vec<QueryFileEntry>,
+    pub filtered_indices: Vec<usize>,
+    pub selected_filtered_index: Option<usize>,
+    pub filter_input: SingleLineInput,
+    pub scroll: usize,
+}
+
+impl OpenDialogState {
+    pub fn new(entries: Vec<QueryFileEntry>) -> Self {
+        let mut state = Self {
+            entries,
+            filtered_indices: Vec::new(),
+            selected_filtered_index: None,
+            filter_input: SingleLineInput::new(String::new()),
+            scroll: 0,
+        };
+        state.apply_filter();
+        state
+    }
+
+    pub fn apply_filter(&mut self) {
+        let needle = self.filter_input.value().to_ascii_lowercase();
+        let trimmed = needle.trim();
+        if trimmed.is_empty() {
+            self.filtered_indices = (0..self.entries.len()).collect();
+        } else {
+            self.filtered_indices = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, entry)| entry.searchable.contains(trimmed).then_some(idx))
+                .collect();
+        }
+        if self.filtered_indices.is_empty() {
+            self.selected_filtered_index = None;
+            self.scroll = 0;
+        } else {
+            let next = self
+                .selected_filtered_index
+                .unwrap_or(0)
+                .min(self.filtered_indices.len().saturating_sub(1));
+            self.selected_filtered_index = Some(next);
+        }
+    }
+
+    pub fn move_selection(&mut self, delta: i32) {
+        if self.filtered_indices.is_empty() {
+            self.selected_filtered_index = None;
+            return;
+        }
+        let current = self.selected_filtered_index.unwrap_or(0) as i32;
+        let len = self.filtered_indices.len() as i32;
+        let mut next = current + delta;
+        if next < 0 {
+            next = 0;
+        } else if next >= len {
+            next = len - 1;
+        }
+        self.selected_filtered_index = Some(next as usize);
+    }
+
+    pub fn selected_entry(&self) -> Option<&QueryFileEntry> {
+        let pos = self.selected_filtered_index?;
+        let idx = *self.filtered_indices.get(pos)?;
+        self.entries.get(idx)
+    }
+
+    pub fn visible_bounds(&mut self, view_height: usize) -> (usize, usize) {
+        self.ensure_visible(view_height);
+        let end = (self.scroll + view_height).min(self.filtered_indices.len());
+        (self.scroll, end)
+    }
+
+    fn ensure_visible(&mut self, view_height: usize) {
+        if view_height == 0 || self.filtered_indices.is_empty() {
+            self.scroll = 0;
+            return;
+        }
+        let selected = self.selected_filtered_index.unwrap_or(0);
+        if selected < self.scroll {
+            self.scroll = selected;
+            return;
+        }
+        let view_height = view_height.min(self.filtered_indices.len());
+        let bottom = self.scroll.saturating_add(view_height.saturating_sub(1));
+        if selected > bottom {
+            let needed = selected + 1;
+            self.scroll = needed.saturating_sub(view_height);
+        }
+        let max_scroll = self.filtered_indices.len().saturating_sub(view_height);
+        if self.scroll > max_scroll {
+            self.scroll = max_scroll;
+        }
+    }
 }
 
 fn resolve_default_region() -> String {
@@ -169,6 +365,7 @@ pub struct App {
     pub query_area: TextArea<'static>,
     pub query_scroll_row: u16,
     pub query_scroll_col: u16,
+    pub saved_query_path: Option<PathBuf>,
     pub results: QueryResults,
     pub column_visibility: Vec<bool>,
     pub column_visibility_overrides: HashMap<String, bool>,
@@ -189,6 +386,8 @@ pub struct App {
     pub results_view_height: usize,
     pub submitting: bool,
     pub column_modal: Option<ColumnPickerState>,
+    pub save_dialog: Option<SaveDialogState>,
+    pub open_dialog: Option<OpenDialogState>,
 }
 
 impl App {
@@ -349,6 +548,8 @@ impl App {
         self.selected_filtered_index = None;
         self.modal_open = false;
         self.column_modal = None;
+        self.save_dialog = None;
+        self.open_dialog = None;
         self.results.headers = data.headers;
         self.results.rows = data.rows.into_iter().map(ResultRow::new).collect();
         self.sync_column_visibility();
@@ -764,11 +965,97 @@ impl App {
             self.help_open = true;
             self.modal_open = false;
             self.column_modal = None;
+            self.save_dialog = None;
+            self.open_dialog = None;
         }
     }
 
     pub fn close_help(&mut self) {
         self.help_open = false;
+    }
+
+    pub fn query_block_title(&self) -> String {
+        if let Some(name) = self.saved_query_display_name() {
+            format!("Logs Insights query ({name})")
+        } else {
+            "Logs Insights query".to_string()
+        }
+    }
+
+    pub fn saved_query_display_name(&self) -> Option<String> {
+        self.saved_query_path.as_ref().map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| path.display().to_string())
+        })
+    }
+
+    pub fn saved_query_file_name(&self) -> Option<String> {
+        self.saved_query_path.as_ref().and_then(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|value| value.to_string())
+        })
+    }
+
+    pub fn set_saved_query_path(&mut self, path: PathBuf) {
+        self.saved_query_path = Some(path);
+    }
+
+    pub fn open_save_dialog_with_entries(
+        &mut self,
+        mode: SaveDialogMode,
+        prefill: Option<String>,
+        entries: Vec<QueryFileEntry>,
+    ) {
+        let text = prefill.unwrap_or_default();
+        let input = SingleLineInput::new(text);
+        let state = SaveDialogState::new(mode, input, entries);
+        self.save_dialog = Some(state);
+        self.modal_open = false;
+        self.column_modal = None;
+        self.help_open = false;
+        self.open_dialog = None;
+    }
+
+    pub fn close_save_dialog(&mut self) {
+        self.save_dialog = None;
+    }
+
+    pub fn save_dialog_active(&self) -> bool {
+        self.save_dialog.is_some()
+    }
+
+    pub fn save_dialog_state_mut(&mut self) -> Option<&mut SaveDialogState> {
+        self.save_dialog.as_mut()
+    }
+
+    pub fn open_open_dialog(&mut self, entries: Vec<QueryFileEntry>) {
+        self.open_dialog = Some(OpenDialogState::new(entries));
+        self.modal_open = false;
+        self.column_modal = None;
+        self.help_open = false;
+        self.save_dialog = None;
+    }
+
+    pub fn close_open_dialog(&mut self) {
+        self.open_dialog = None;
+    }
+
+    pub fn open_dialog_active(&self) -> bool {
+        self.open_dialog.is_some()
+    }
+
+    pub fn open_dialog_state_mut(&mut self) -> Option<&mut OpenDialogState> {
+        self.open_dialog.as_mut()
+    }
+
+    pub fn open_dialog_selected_path(&self) -> Option<PathBuf> {
+        self.open_dialog
+            .as_ref()
+            .and_then(|state| state.selected_entry())
+            .map(|entry| entry.path.clone())
     }
 }
 
@@ -823,6 +1110,7 @@ impl Default for App {
             query_area,
             query_scroll_row: 0,
             query_scroll_col: 0,
+            saved_query_path: None,
             results: QueryResults::default(),
             column_visibility: Vec::new(),
             column_visibility_overrides: HashMap::new(),
@@ -843,6 +1131,8 @@ impl Default for App {
             results_view_height: 0,
             submitting: false,
             column_modal: None,
+            save_dialog: None,
+            open_dialog: None,
         }
     }
 }
@@ -916,6 +1206,8 @@ impl App {
         let state = ColumnPickerState::new(self.column_visibility.clone());
         self.column_modal = Some(state);
         self.modal_open = false;
+        self.save_dialog = None;
+        self.open_dialog = None;
     }
 
     pub fn close_column_modal(&mut self) {
