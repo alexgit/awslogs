@@ -231,6 +231,7 @@ pub fn draw_ui(frame: &mut Frame, app: &mut App) {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(query_chunk);
 
+        app.query_area.set_cursor_line_style(Style::default());
         let query_title = app.query_block_title();
         let query_block = input_block(Cow::Owned(query_title), app.focus == FocusField::Query);
         if app.focus == FocusField::Query {
@@ -240,9 +241,8 @@ pub fn draw_ui(frame: &mut Frame, app: &mut App) {
             let hidden_style = app.query_area.cursor_line_style();
             app.query_area.set_cursor_style(hidden_style);
         }
-        app.query_area.set_block(Block::default());
+        app.query_area.set_block(query_block.clone());
         frame.render_widget(app.query_area.widget(), row[0]);
-        frame.render_widget(query_block.clone(), row[0]);
         let inner = query_block.inner(row[0]);
         if inner.width > 0 && inner.height > 0 {
             let (cursor_row, cursor_col) = app.query_area.cursor();
