@@ -256,11 +256,24 @@ pub fn draw_ui(frame: &mut Frame, app: &mut App) {
         None
     };
     let inner_height = results_area.height.saturating_sub(2) as usize;
-    app.update_results_view_height(inner_height.max(1));
+    let has_table_rows = !app.results.rows.is_empty() && !app.filtered_indices.is_empty();
+    let rows_height = if has_table_rows {
+        inner_height.saturating_sub(1)
+    } else {
+        inner_height
+    };
+    app.update_results_view_height(rows_height.max(1));
     let total_rows = app.results.rows.len();
     let visible_rows = app.filtered_indices.len();
     let results_title = if total_rows > 0 {
-        format!("Query results ({visible_rows}/{total_rows})")
+        let mut metrics = vec![format!("{visible_rows}/{total_rows}")];
+        if let Some(selected) = app
+            .selected_filtered_index
+            .filter(|_| !app.filtered_indices.is_empty())
+        {
+            metrics.push(format!("row {}", selected + 1));
+        }
+        format!("Query results ({})", metrics.join(" · "))
     } else {
         "Query results".to_string()
     };
